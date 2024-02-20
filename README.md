@@ -50,6 +50,10 @@ Hardware:
 
 The entire notebook was run on Google Colab, using Nvidia's T4 GPU (colab's default). this resulted in needing to save our work on disk, as colab offers only limited free resources. it also made training impossible without resizing our image data.
 
+Display:
+
+Many images were removed from the output to be able to upload to github
+
 Sources of inspiration for the code
 
 https://github.com/Liang-yc/ECUSTFD-resized-
