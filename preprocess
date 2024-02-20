@@ -1,0 +1,495 @@
+#3.Preprocess
+
+We start by downloading the github repo:
+
+!git clone https://github.com/Liang-yc/ECUSTFD-resized-.git
+
+import pandas as pd
+import numpy as np
+import re
+import os
+import glob
+import xml.etree.ElementTree as ET
+import shutil
+import logging
+logging.getLogger().setLevel(logging.CRITICAL)
+import random
+import json
+import pickle
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+import cv2
+import seaborn as sns
+sns.set(style = "dark",
+        color_codes = True,
+        font_scale = 1.5)
+
+Let's get a feel for out dataset
+
+!ls /content/ECUSTFD-resized-
+
+ins_array = ['train', 'val', 'trainval','test']
+files_map = {}
+path = '/content/ECUSTFD-resized-/ImageSets/Main/'
+for i in ins_array:
+  with open(path + i + '.txt', 'r') as f:
+    files_map[i] = f.readlines()
+  print("number of images in" , i , "split is: " ,len(files_map[i]))
+
+w_v_df = pd.read_excel(
+    "/content/ECUSTFD-resized-/density.xls",
+    sheet_name=None,
+)
+w_v_df = pd.concat(w_v_df.values(), axis=0)
+w_v_df = w_v_df.reset_index(drop=True)
+w_v_df
+
+Looks like the designated train/val/test split isn't good, as the test set is more than 50% of the data. we'll have to use a different one. we also have ground truth for our volume and weight, for all the 174 unique food items in the images.
+
+First we check if any there are any bad filenames and fix them if found:
+
+bad_ext= []
+bad_fnames = []
+print("checking annotations extensions")
+for dirpath, _, filenames in os.walk('/content/ECUSTFD-resized-/Annotations'):
+  for filename in filenames:
+    if filename.split(".")[1] != 'xml':
+      bad_ext.append(filename)
+if bad_ext != []:
+  print("wrong annotations extensions (should all be 'xml'):")
+  for bad in bad_ext:
+    print(bad)
+else:
+  print("all annotations extensions are OK\n")
+# let's check if any S,T are lowercase
+print("checking annotations filenames")
+for file in os.listdir('/content/ECUSTFD-resized-/Annotations'):
+  tmp = file.split(".")[0]
+  split = tmp.split("(")[0]
+  if split[-1] == 's':
+    bad_fnames.append(file)
+  if split[-1] == 't':
+    bad_fnames.append(file)
+if bad_fnames != []:
+  print("bad annotations filenames (should all be have 'S' or 'T'):")
+  for bad in bad_fnames:
+    print(bad)
+else:
+  print("all annotations filenames are OK")
+
+bad_ext= []
+bad_fnames = []
+print("\nchecking images extensions")
+for dirpath, _, filenames in os.walk('/content/ECUSTFD-resized-/JPEGImages'):
+  for filename in filenames:
+    if filename.split(".")[1] != 'JPG':
+      bad_ext.append(filename)
+if bad_ext != []:
+  print("wrong images extensions (should all be 'JPG'):")
+  for bad in bad_ext:
+    print(bad)
+else:
+  print("all images extensions are OK\n")
+# let's check if any S,T are lowercase
+print("checking images filenames")
+for file in os.listdir('/content/ECUSTFD-resized-/JPEGImages'):
+  tmp = file.split(".")[0]
+  split = tmp.split("(")[0]
+  if split[-1] == 's':
+    bad_fnames.append(file)
+  if split[-1] == 't':
+    bad_fnames.append(file)
+if bad_fnames != []:
+  print("bad images filenames (should all be have 'S' or 'T'):")
+  for bad in bad_fnames:
+    print(bad)
+else:
+  print("all images filenames are OK")
+
+
+# let's fix the lower case
+for file in os.listdir('/content/ECUSTFD-resized-/Annotations/'):
+  tmp = file.split(".")[0]
+  split = tmp.split("(")[0]
+  if split[-1] == 's':
+    t = file.replace("s(","S(")
+    os.rename('/content/ECUSTFD-resized-/Annotations/' + file,'/content/ECUSTFD-resized-/Annotations/' + t)
+
+# let's fix the lower case
+for file in os.listdir('/content/ECUSTFD-resized-/JPEGImages/'):
+  tmp = file.split(".")[0]
+  split = tmp.split("(")[0]
+  if split[-1] == 's':
+    t = file.replace("s(","S(")
+    os.rename('/content/ECUSTFD-resized-/JPEGImages/' + file,'/content/ECUSTFD-resized-/JPEGImages/' + t)
+
+Let's load all the annotations into a CSV file to help us explore it
+
+# Function that will extract column data for our CSV file
+def xml_to_csv(path):
+    xml_list = []
+    for xml_file in glob.glob(path + '/*.xml'):
+        tree = ET.parse(xml_file)
+        root = tree.getroot()
+        for member in root.findall('object'):
+            bbox = [0,0,0,0]
+            bbox[0] = int(member[4][0].text)
+            bbox[1] = int(member[4][1].text)
+            bbox[2] = int(member[4][2].text)
+            bbox[3] = int(member[4][3].text)
+            value = (root.find('filename').text,
+                     int(root.find('size')[0].text),
+                     int(root.find('size')[1].text),
+                     int(root.find('size')[2].text),
+                     member[0].text,
+                     (root.find('filename').text).split("0")[0],
+                     bbox,
+                     "/content/ECUSTFD-resized-/JPEGImages/" + root.find('filename').text
+                     )
+            xml_list.append(value)
+    column_name = ['filename', 'width', 'height', 'channels','instance', 'class', 'bbox','Image']
+    xml_df = pd.DataFrame(xml_list, columns=column_name)
+    return xml_df
+
+total_df = xml_to_csv('/content/ECUSTFD-resized-/Annotations')
+total_df.to_csv(('total.csv'), index=None)
+print('Successfully converted xml to csv.')
+
+First we are going to change our dataset format from PASCAL VOC to COCO
+
+!pip install pylabel > /dev/null
+from pylabel import importer
+
+dataset = importer.ImportVOC(path="/content/ECUSTFD-resized-/Annotations", path_to_images="/content/ECUSTFD-resized-/JPEGImages", name="All")
+dataset.export.ExportToCoco()
+
+Now let's see some images and bounding boxes:
+
+def display_images(image_paths):
+    fig, axs = plt.subplots(5, 4, figsize=(10, 10))
+
+    for ax, img_path in zip(axs.ravel(), image_paths):
+        image = cv2.imread(img_path)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        tmp = (img_path.split("/JPEGImages/")[1]).split("0")[0]
+        ax.set_title(tmp, fontsize=10)
+        ax.imshow(image)
+        ax.axis('off')
+
+    plt.tight_layout()
+    plt.subplots_adjust(wspace=0.01, hspace=0.15)
+    plt.show()
+
+with open('/content/ECUSTFD-resized-/Annotations/All.json', 'r') as f:
+    annotations = json.load(f)
+
+image_dir = "/content/ECUSTFD-resized-/JPEGImages/"
+all_image_files = [os.path.join(image_dir, img['file_name']) for img in annotations['images']]
+random_image_files = random.sample(all_image_files, 20)
+display_images(random_image_files)
+
+We can see that our images are in RGB format. Each image should have a coin for calibration, all should have 1 or 2 food pieces in them
+
+def display_images_with_coco_annotations(image_paths, annotations, colors=None):
+    fig, axs = plt.subplots(4, 5, figsize=(10, 10))
+
+    for ax, img_path in zip(axs.ravel(), image_paths):
+        image = cv2.imread(img_path)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        tmp = (img_path.split("/JPEGImages/")[1]).split("0")[0]
+        ax.set_title(tmp, fontsize=10)
+        ax.imshow(image)
+        ax.axis('off')
+
+        if colors is None:
+            colors = plt.cm.get_cmap('tab10')
+
+        img_filename = os.path.basename(img_path)
+        img_id = next(item for item in annotations['images'] if item["file_name"] == img_filename)['id']
+        img_annotations = [ann for ann in annotations['annotations'] if ann['image_id'] == img_id]
+
+        for ann in img_annotations:
+            category_id = ann['category_id']
+            color = colors(category_id % 10)
+
+            bbox = ann['bbox']
+            rect = patches.Rectangle((bbox[0], bbox[1]), bbox[2], bbox[3], linewidth=1, edgecolor=color, facecolor='none')
+            ax.add_patch(rect)
+
+    plt.tight_layout()
+    plt.subplots_adjust(wspace=0.01, hspace=0.01)
+    plt.show()
+
+with open('/content/ECUSTFD-resized-/Annotations/All.json', 'r') as f:
+    annotations = json.load(f)
+
+image_dir = "/content/ECUSTFD-resized-/JPEGImages/"
+all_image_files = [os.path.join(image_dir, img['file_name']) for img in annotations['images']]
+random_image_files = random.sample(all_image_files, 20)
+display_images_with_coco_annotations(random_image_files, annotations)
+
+Let's explore some basic attributes
+
+total_df
+
+Let's check if all images have coins in them for calibration and have bboxes:
+
+total_df["instance"].value_counts()
+
+Looks like we have 2 images without coins. Let's find them
+
+(in the dataset github it says that 2 images are missing coins!)
+
+check = []
+regular = []
+for i, file in enumerate(total_df["filename"]):
+    #if file has no coin instance
+    if total_df["instance"][i] != 'coin':
+      #filenames to be checked
+      check.append(file)
+    else:
+      #with a coin
+      regular.append(file)
+
+no_coin = []
+for i, file in enumerate(total_df['filename']):
+    # filename is ok
+    if total_df['filename'][i] in regular:
+      continue
+    else:
+      no_coin.append(total_df['filename'][i])
+
+no_coin = list(set(no_coin))
+no_coin
+
+no_coin_img = [image_dir + no_coin[0],image_dir + no_coin[1]]
+fig, axs = plt.subplots(1, 2, figsize=(5, 5))
+
+for ax, img_path in zip(axs.ravel(), no_coin_img):
+    image = cv2.imread(img_path)
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    tmp = img_path.split("/JPEGImages/")[1]
+    ax.set_title(tmp, fontsize=10)
+    ax.imshow(image)
+    ax.axis('off')
+
+plt.tight_layout()
+plt.subplots_adjust(wspace=0.01, hspace=0.15)
+plt.show()
+
+Now for the bounding boxes:
+
+total_df["bbox"].empty
+
+The dataframe is more than double the size of our dataset, since we get a row in the dataframe for all different instances in every class. we'll drop duplicates to analyze it.
+
+total_df_no_dups = pd.read_csv("total.csv")
+total_df_no_dups.drop_duplicates(subset="filename",
+                     keep="first", inplace=True,ignore_index = True)
+total_df_no_dups
+
+Let's check image dimenstions distribution:
+
+fig, axes = plt.subplots(1, 3, figsize=(15, 5), sharey=True)
+fig.suptitle('Distribution of dimensions within dataset')
+
+labels_height = total_df_no_dups["height"].value_counts()
+pal = sns.color_palette("husl", len(labels_height))
+rank = labels_height.argsort().argsort()
+
+sns.barplot(ax=axes[0], x=[label for label in labels_height.index], y=labels_height.values, palette=np.array(pal[::-1])[rank])
+axes[0].set_title("Height")
+
+labels_width = total_df_no_dups["width"].value_counts()
+pal = sns.color_palette("husl", len(labels_width))
+rank = labels_width.argsort().argsort()
+
+sns.barplot(ax=axes[1], x=[label for label in labels_width.index], y=labels_width.values, palette=np.array(pal[::-1])[rank])
+axes[1].set_title("Width")
+
+labels_channels = total_df_no_dups["channels"].value_counts()
+pal = sns.color_palette("husl", len(labels_channels))
+rank = labels_channels.argsort().argsort()
+
+sns.barplot(ax=axes[2], x=[label for label in labels_channels.index], y=labels_channels.values, palette=np.array(pal[::-1])[rank])
+axes[2].set_title("Channels")
+
+Looks like that most of our images are 612h, 816w, and all in RGB format
+
+Now let's explore the classes. classes are based on filenames, that means we set a class "mix" and no class "coin".
+
+total_df_no_dups["class"].value_counts()
+
+We can see that we have a huge class imbalance. Let's plot it.
+
+labels = total_df_no_dups["class"].value_counts()
+
+pal = sns.color_palette("husl", len(labels))
+rank = labels.argsort().argsort()
+
+ax = sns.barplot(x=[label for label in labels.index], y=labels.values, palette=np.array(pal[::-1])[rank])
+plt.title("Distribution of classes within dataset")
+plt.ylabel("# of images")
+plt.xlabel("Class")
+ax.set_xticklabels(ax.get_xticklabels(), rotation=90);
+
+Now let's check for overlaps in our bounding boxes via IoU calculation:
+
+def bb_intersection_over_union(boxA, boxB):
+  # determine the (x, y)-coordinates of the intersection rectangle
+  xA = max(boxA[0], boxB[0])
+  yA = max(boxA[1], boxB[1])
+  xB = min(boxA[2], boxB[2])
+  yB = min(boxA[3], boxB[3])
+  # compute the area of intersection rectangle
+  interArea = max(0, xB - xA + 1) * max(0, yB - yA + 1)
+  return interArea
+
+def get_bad_bboxes(total_df):
+  bad_list = []
+  for name in total_df["filename"].unique():
+    idx = (np.array(np.where(total_df["filename"] == name)[0]))
+    if len(idx) == 2: # for images with coin and another class
+      a = (bb_intersection_over_union(total_df['bbox'][idx[0]], total_df['bbox'][idx[1]]))
+      if a > 0: # if > 0 it means there's an overlap
+        bad_list.append(name)
+    else: # for images with coin and 2 other classes, we check for all 3 options
+      b = (bb_intersection_over_union(total_df['bbox'][idx[0]], total_df['bbox'][idx[1]]))
+      c = (bb_intersection_over_union(total_df['bbox'][idx[0]], total_df['bbox'][idx[2]]))
+      d = (bb_intersection_over_union(total_df['bbox'][idx[1]], total_df['bbox'][idx[2]]))
+      if b > 0:
+        bad_list.append(name)
+      if c > 0:
+        bad_list.append(name)
+      if d > 0:
+        bad_list.append(name)
+  return bad_list
+
+bad_list = get_bad_bboxes(total_df)
+print("number of bad annotations is:", len(bad_list))
+
+Let's understand where the problem is by looking:
+
+with open('/content/ECUSTFD-resized-/Annotations/All.json', 'r') as f:
+    annotations = json.load(f)
+
+image_dir = "/content/ECUSTFD-resized-/JPEGImages/"
+all_image_files = [os.path.join(image_dir, img['file_name']) for img in annotations['images']]
+bad_list_path = []
+for name in bad_list:
+ bad_list_path.append(image_dir + name)
+random_image_files = random.sample(bad_list_path, 20)
+display_images_with_coco_annotations(random_image_files, annotations)
+
+We can see some random bad annotations. We have a total of 53 images with bad annotations - 2 without coins, and 51 with overlaping boxes. some are overlapping, some are misplaced. it is important to know that we might still have bad annotations, like misplaced bboxes, but we can't find them except by looking at all the images/bboxes.
+
+Let's reload the dataset without the bad annotations and the 2 imags without coins (maybe we should use them in the test set?)
+
+new_bad_list = bad_list.copy()
+new_bad_list.append(no_coin[0])
+new_bad_list.append(no_coin[1])
+print(len(new_bad_list))
+
+total_df_cleaned = total_df.copy()
+for i,name in enumerate(total_df_cleaned['filename']):
+  if name in new_bad_list:
+    total_df_cleaned = total_df_cleaned.drop(i)
+total_df_cleaned = total_df_cleaned.reset_index(drop=True)
+total_df_cleaned
+
+print("# of unique filenames:" ,len(total_df_cleaned['filename'].unique()))
+print("per instance count:")
+total_df_cleaned['instance'].value_counts()
+
+Now let's reload the dataset json without the bad annotaions
+
+def manage_dataset_clean(path = '/content/ECUSTFD-resized-/Annotations/',dataframe = total_df_cleaned):
+  root = '/content/Ecustfd-COCO-no-seg-masks-cleaned/'
+  anns_path = "/content/ECUSTFD-resized-/Annotations/"
+  path_to_images = "/content/ECUSTFD-resized-/JPEGImages/"
+
+  if not os.path.exists(root):
+    os.mkdir(root)
+
+  if not os.path.exists(root + 'JPEGImages/'):
+    os.mkdir(root + 'JPEGImages/')
+
+  for file in os.listdir(path):
+    tmp = file.split(".xml")[0]
+    for name in dataframe["filename"].unique():
+      if name.split(".JPG")[0] == tmp:
+        shutil.copyfile(anns_path + file, root + 'JPEGImages/' +  file)
+
+  path_to_annotations = (root + 'JPEGImages/')
+  return path_to_annotations, path_to_images
+
+path_to_annotations, path_to_images = manage_dataset_clean(path = '/content/ECUSTFD-resized-/Annotations/',dataframe = total_df_cleaned)
+
+dataset = importer.ImportVOC(path=path_to_annotations, path_to_images=path_to_images, name="AllClean")
+dataset.export.ExportToCoco()
+
+looks like we're missing a few files, there should be 2925
+
+files_df = []
+for file in total_df_cleaned["filename"].unique():
+  tmp = file.split(".JPG")[0]
+  files_df.append(tmp)
+files_df = sorted(files_df)
+
+files_dir = []
+for file in os.listdir("/content/Ecustfd-COCO-no-seg-masks-cleaned/JPEGImages"):
+  if file == "AllClean.json":
+    continue
+  else:
+    tmp = file.split(".xml")[0]
+    files_dir.append(tmp)
+files_dir = sorted(files_dir)
+
+print(len(files_df),len(files_dir))
+
+looks like not all files were copied
+
+diff = set(files_df) - set(files_dir)
+diff
+
+The same files we found at the beginning, now the problem was because how they were written in the xml file to begin with. let's rename those files with 'S'
+
+for file in diff:
+  idx = (list(np.where(total_df_cleaned["filename"] == file + ".JPG")))
+  tmp = file.replace("s(","S(")
+  total_df_cleaned["filename"][idx[0][0]] = tmp
+  total_df_cleaned["filename"][idx[0][1]] = tmp
+
+
+now let's reload the data
+
+shutil.rmtree("/content/Ecustfd-COCO-no-seg-masks-cleaned", ignore_errors=True)
+
+path_to_annotations, path_to_images = manage_dataset_clean(path = '/content/ECUSTFD-resized-/Annotations/',dataframe = total_df_cleaned)
+dataset = importer.ImportVOC(path=path_to_annotations, path_to_images=path_to_images, name="AllClean")
+dataset.export.ExportToCoco()
+
+for i, bad_filename in enumerate(total_df_cleaned["Image"]):
+  if bad_filename.split("(")[0][-1] == 's':
+    total_df_cleaned["Image"][i] = total_df_cleaned["Image"][i].replace("s(","S(")
+
+for i, bad_filename in enumerate(total_df_cleaned["Image"]):
+  if bad_filename.split("(")[0][-1] == 's':
+    print(bad_filename)
+
+total_df_cleaned_no_dups = total_df_cleaned.copy()
+total_df_cleaned_no_dups.drop_duplicates(subset="filename",
+                     keep="first", inplace=True,ignore_index = True)
+total_df_cleaned_no_dups
+
+## Summary
+
+We fixed the following issues we found in the dataset:
+- Renamed wrong filenames (images and annotations) : change 's' to 'S'
+- Removed images with overlapping bounding box
+- Removed images without coins
+
+We explored the dataset and notice the following:
+- Imbalances with class distribution
+- Most images has the same height and width
+- All images in RGB format
